@@ -1,0 +1,10 @@
+{
+  "name": "employee-task-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Role-aware employee task management dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
