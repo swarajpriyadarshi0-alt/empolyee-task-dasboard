@@ -6,5 +6,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
+  },
+  "dependencies": {
+    "googleapis": "^144.0.0"
   }
 }
