@@ -23,7 +23,7 @@ function getPrivateKey() {
 
   // Convert escaped quotation marks if present
   key = key.replace(/\\"/g, '"');
-
+cç.      
   return key;
 }
 
@@ -974,58 +974,291 @@ async function api(req, res, url) {
    VERCEL SERVER HANDLER
    ========================================================= */
 
-async function handler(req, res) {
-  const url = new URL(
-    req.url,
-    `http://${req.headers.host || "localhost"}`
-  ).pathname;
+async function api(req, res, url) {
+  const db = await getDatabase();
 
-  if (url.startsWith("/api/")) {
-    try {
-      await api(req, res, url);
-    } catch (error) {
-      console.error(error);
+  if (
+    req.method === "POST" &&
+    url === "/api/login"
+  ) {
+    const input = await requestBody(req);
 
-      if (!res.headersSent) {
-        send(res, 500, {
-          error: error.message || "Server error."
-        });
-      } else {
-        res.end();
-      }
+    const user = db.users.find(
+      item =>
+        String(item.userId).toLowerCase() ===
+        String(input.userId || "").trim().toLowerCase()
+    );
+
+    if (
+      !user ||
+      !user.active ||
+      !verify(
+        String(input.password || ""),
+        user.passwordHash
+      )
+    ) {
+      return send(res, 401, {
+        error: "Invalid credentials or inactive account."
+      });
     }
 
-    return;
+    const token = crypto.randomBytes(32).toString("hex");
+
+    sessions.set(token, {
+      id: user.id,
+      role: user.role
+    });
+
+    return send(
+      res,
+      200,
+      {
+        user: userView(user, db)
+      },
+      {
+        "Set-Cookie":
+          `session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`
+      }
+    );
+  }
+
+  if (
+    req.method === "POST" &&
+    url === "/api/logout"
+  ) {
+    const cookies = parseCookies(req);
+
+    sessions.delete(cookies.session);
+
+    return send(
+      res,
+      200,
+      { ok: true },
+      {
+        "Set-Cookie":
+          "session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
+      }
+    );
+  }
+
+  const actor = requireUser(req, res);
+
+  if (!actor) return;
+
+  if (
+    actor.role !== "admin" &&
+    (
+      url.startsWith("/api/users") ||
+      url.startsWith("/api/branches") ||
+      (url === "/api/tasks" && req.method === "POST") ||
+      url === "/api/history"
+    )
+  ) {
+    return send(res, 403, {
+      error: "Manager access required."
+    });
   }
 
   if (
     req.method === "GET" &&
-    (url === "/" || url === "/index.html")
+    url === "/api/session"
   ) {
-    try {
-      const html = fs.readFileSync(INDEX_FILE, "utf8");
-
-      res.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8"
-      });
-
-      res.end(html);
-    } catch {
-      res.writeHead(500, {
-        "Content-Type": "text/plain; charset=utf-8"
-      });
-
-      res.end("index.html not found.");
-    }
-
-    return;
+    return send(res, 200, {
+      user: userView(findUser(db, actor.id), db)
+    });
   }
 
-  res.writeHead(404, {
-    "Content-Type": "text/plain; charset=utf-8"
+  /*
+    CREATE AND ASSIGN TASK
+  */
+
+  if (
+    req.method === "POST" &&
+    url === "/api/tasks"
+  ) {
+    if (actor.role !== "admin") {
+      return send(res, 403, {
+        error: "Manager access required."
+      });
+    }
+
+    const input = await requestBody(req);
+
+    const employeeIds = Array.isArray(input.employeeIds)
+      ? input.employeeIds
+      : input.employeeId
+        ? [input.employeeId]
+        : [];
+
+    const title = String(input.title || "").trim();
+
+    if (!title) {
+      return send(res, 400, {
+        error: "Task title is required."
+      });
+    }
+
+    if (employeeIds.length === 0) {
+      return send(res, 400, {
+        error: "Please select at least one employee."
+      });
+    }
+
+    const assignmentGroupId = uid("group");
+    const createdTasks = [];
+
+    for (const employeeId of employeeIds) {
+      const employee = findUser(db, employeeId);
+
+      if (!employee || employee.role !== "employee") {
+        continue;
+      }
+
+      const task = {
+        id: uid("task"),
+        assignmentGroupId,
+        title,
+        description: String(input.description || ""),
+        employeeId: employee.id,
+        branchId: input.branchId || null,
+        status: STATUSES.includes(input.status)
+          ? input.status
+          : "Not Started",
+        priority: PRIORITIES.includes(input.priority)
+          ? input.priority
+          : "Medium",
+        progress: validProgress(input.progress)
+          ? Number(input.progress)
+          : 0,
+        dueDate: input.dueDate || null,
+        createdBy: actor.id,
+        createdAt: now(),
+        updatedAt: now()
+      };
+
+      db.tasks.unshift(task);
+
+      log(
+        db,
+        task.id,
+        actor.id,
+        "created",
+        null,
+        task
+      );
+
+      notify(
+        db,
+        employee.id,
+        "task_assigned",
+        "New task assigned",
+        `You have been assigned: ${task.title}`
+      );
+
+      createdTasks.push(task);
+    }
+
+    if (createdTasks.length === 0) {
+      return send(res, 400, {
+        error: "No valid employees were found."
+      });
+    }
+
+    await writeGoogleDatabase(db);
+
+    return send(res, 201, {
+      tasks: createdTasks.map(task =>
+        taskView(task, db)
+      )
+    });
+  }
+
+  /*
+    DASHBOARD
+  */
+
+  if (
+    req.method === "GET" &&
+    url === "/api/dashboard"
+  ) {
+    const user = findUser(db, actor.id);
+
+    const tasks =
+      actor.role === "admin"
+        ? db.tasks
+        : db.tasks.filter(
+            task => task.employeeId === actor.id
+          );
+
+    return send(res, 200, {
+      user: userView(user, db),
+
+      users:
+        actor.role === "admin"
+          ? db.users
+              .filter(item => item.role === "employee")
+              .map(item => userView(item, db))
+          : [],
+
+      branches:
+        actor.role === "admin"
+          ? db.branches.map(branch =>
+              branchView(db, branch)
+            )
+          : (user.branchIds || [])
+              .map(id => findBranch(db, id))
+              .filter(Boolean)
+              .map(branch => branchView(db, branch)),
+
+      tasks: tasks.map(task =>
+        taskView(task, db)
+      ),
+
+      performance: performanceView(
+        db,
+        tasks,
+        actor.role === "admin" ? null : actor.id
+      ),
+
+      notifications: db.notifications
+        .filter(note => note.userId === actor.id)
+        .slice(0, 50),
+
+      history:
+        actor.role === "admin"
+          ? db.taskHistory.slice(0, 100)
+          : []
+    });
+  }
+
+  /*
+    TASK HISTORY
+  */
+
+  if (
+    req.method === "GET" &&
+    url === "/api/history" &&
+    actor.role === "admin"
+  ) {
+    return send(res, 200, {
+      history: db.taskHistory
+        .slice(0, 200)
+        .map(item => ({
+          ...item,
+
+          taskTitle:
+            db.tasks.find(
+              task => task.id === item.taskId
+            )?.title || "Deleted task",
+
+          changedByName:
+            findUser(db, item.changedBy)?.name ||
+            "Unknown"
+        }))
+    });
+  }
+
+  return send(res, 404, {
+    error: "The requested API route was not found."
   });
-
-  res.end("Not found.");
 }
-
-module.exports = handler;
