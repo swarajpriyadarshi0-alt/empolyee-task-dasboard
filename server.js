@@ -1234,7 +1234,106 @@ async function api(req, res, url) {
   /*
     TASK HISTORY
   */
+  if (
+    req.method === "POST" &&
+    url === "/api/tasks"
+  ) {
+    if (actor.role !== "admin") {
+      return send(res, 403, {
+        error: "Manager access required."
+      });
+    }
 
+    const input = await requestBody(req);
+
+    const employeeIds = Array.isArray(input.employeeIds)
+      ? input.employeeIds
+      : input.employeeId
+        ? [input.employeeId]
+        : [];
+
+    const title = String(input.title || "").trim();
+
+    if (!title) {
+      return send(res, 400, {
+        error: "Task title is required."
+      });
+    }
+
+    if (employeeIds.length === 0) {
+      return send(res, 400, {
+        error: "Please select at least one employee."
+      });
+    }
+
+    const assignmentGroupId = uid("group");
+    const createdTasks = [];
+
+    for (const employeeId of employeeIds) {
+      const employee = findUser(db, employeeId);
+
+      if (!employee || employee.role !== "employee") {
+        continue;
+      }
+
+      const task = {
+        id: uid("task"),
+        assignmentGroupId,
+        title,
+        description: String(input.description || ""),
+        employeeId: employee.id,
+        branchId: input.branchId || null,
+        status: STATUSES.includes(input.status)
+          ? input.status
+          : "Not Started",
+        priority: PRIORITIES.includes(input.priority)
+          ? input.priority
+          : "Medium",
+        progress: validProgress(input.progress)
+          ? Number(input.progress)
+          : 0,
+        dueDate: input.dueDate || null,
+        createdBy: actor.id,
+        createdAt: now(),
+        updatedAt: now()
+      };
+
+      db.tasks.unshift(task);
+
+      log(
+        db,
+        task.id,
+        actor.id,
+        "created",
+        null,
+        task
+      );
+
+      notify(
+        db,
+        employee.id,
+        "task_assigned",
+        "New task assigned",
+        `You have been assigned: ${task.title}`
+      );
+
+      createdTasks.push(task);
+    }
+
+    if (createdTasks.length === 0) {
+      return send(res, 400, {
+        error: "No valid employees were found."
+      });
+    }
+
+    await writeGoogleDatabase(db);
+
+    return send(res, 201, {
+      tasks: createdTasks.map(task =>
+        taskView(task, db)
+      )
+    });
+  }
   if (
     req.method === "GET" &&
     url === "/api/history" &&
